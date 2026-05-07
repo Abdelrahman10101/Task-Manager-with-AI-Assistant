@@ -5,16 +5,20 @@ class Settings(BaseSettings):
     # ── Secrets (loaded from .env — never commit) ──────────────
     DATABASE_URL: str
     SECRET_KEY: str
-    ALGORITHM: str = "HS256"
+    ALGORITHM: str
     HF_TOKEN: str = ""
 
-    # ── Configuration (loaded from .config — safe to commit) ───
+    # ── AI configuration ───────────────────────────────────────
+    # Override in .env to switch models/providers without touching code
+    HUGGINGFACE_API_URL: str = "https://router.huggingface.co/v1"
+    HF_MODEL: str = "openai/gpt-oss-20b:novita"
+
+    # ── App configuration ──────────────────────────────────────
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080  # 7 days
     FRONTEND_URL: str = "http://localhost:5173"
 
     class Config:
-        # Load secrets first, then config (later files override earlier ones)
-        env_file = (".config", ".env")
+        env_file = ".env"
         env_file_encoding = "utf-8"
 
 

@@ -2,6 +2,20 @@ import httpx
 import json
 from app.config import settings
 from app import models
+from app.prompts.ai_prompts import (
+    SUMMARIZE_SYSTEM,
+    SUMMARIZE_USER,
+    SUGGEST_SYSTEM,
+    SUGGEST_USER,
+)
+
+
+def _hf_url() -> str:
+    return f"{settings.HUGGINGFACE_API_URL}/chat/completions"
+
+
+def _auth_headers() -> dict:
+    return {"Authorization": f"Bearer {settings.HF_TOKEN}"}
 
 
 def _format_tasks_for_prompt(tasks: list[models.Task]) -> str:
@@ -22,10 +36,9 @@ def _format_tasks_for_prompt(tasks: list[models.Task]) -> str:
 
 async def summarize_project(project: models.Project) -> str:
     """
-    Call HuggingFace Inference API to summarize a project's tasks.
-    Uses Mistral-7B-Instruct for instruction-following quality.
+    Call HuggingFace router (/v1/chat/completions) to summarize a project's tasks.
 
-    Falls back to a local summary if HF_TOKEN is not set.
+    Falls back to a local summary if HF_TOKEN is not set or the call fails.
     """
     tasks = project.tasks
     tasks_text = _format_tasks_for_prompt(tasks)
@@ -34,47 +47,37 @@ async def summarize_project(project: models.Project) -> str:
     in_progress = sum(1 for t in tasks if t.status == models.TaskStatus.IN_PROGRESS)
     done = sum(1 for t in tasks if t.status == models.TaskStatus.DONE)
 
-    prompt = f"""<s>[INST] You are a smart project management assistant. Analyze this project and provide a concise summary.
+    user_message = SUMMARIZE_USER.format(
+        project_title=project.title,
+        project_description=f"Description: {project.description}" if project.description else "",
+        task_count=len(tasks),
+        tasks_text=tasks_text,
+        todo=todo,
+        in_progress=in_progress,
+        done=done,
+    )
 
-Project: "{project.title}"
-{f'Description: {project.description}' if project.description else ''}
-
-Tasks ({len(tasks)} total):
-{tasks_text}
-
-Status breakdown: {todo} To Do, {in_progress} In Progress, {done} Done
-
-Provide:
-1. A 2-sentence overall project status assessment
-2. Key risks or blockers (if any)
-3. Top 3 recommended next actions
-
-Be concise and actionable. [/INST]"""
-
-    # If no HF token, return a local computed summary
     if not settings.HF_TOKEN or settings.HF_TOKEN == "hf_your_token_here":
         return _local_fallback_summary(project.title, todo, in_progress, done, len(tasks))
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3",
-                headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
+                _hf_url(),
+                headers=_auth_headers(),
                 json={
-                    "inputs": prompt,
-                    "parameters": {
-                        "max_new_tokens": 400,
-                        "temperature": 0.7,
-                        "return_full_text": False,
-                    },
+                    "model": settings.HF_MODEL,
+                    "messages": [
+                        {"role": "system", "content": SUMMARIZE_SYSTEM},
+                        {"role": "user", "content": user_message},
+                    ],
+                    "max_tokens": 400,
+                    "temperature": 0.7,
                 },
             )
             response.raise_for_status()
             data = response.json()
-
-            if isinstance(data, list) and data:
-                return data[0].get("generated_text", "").strip()
-            return "Could not generate summary. Please try again."
+            return data["choices"][0]["message"]["content"].strip()
 
     except httpx.HTTPError:
         return _local_fallback_summary(project.title, todo, in_progress, done, len(tasks))
@@ -101,26 +104,13 @@ def _local_fallback_summary(title: str, todo: int, in_progress: int, done: int, 
 
 async def suggest_tasks(title: str, description: str | None) -> list[dict]:
     """
-    Call HuggingFace to suggest an initial set of tasks for a new project.
+    Call HuggingFace router to suggest an initial set of tasks for a new project.
     Returns a list of task dicts with title, description, and priority.
     """
-    prompt = f"""<s>[INST] You are a project planning assistant. Suggest 5 concrete tasks for this project.
-
-Project title: "{title}"
-{f'Project description: {description}' if description else ''}
-
-Return ONLY a valid JSON array with exactly 5 objects. Each object must have:
-- "title": short task name (max 8 words)
-- "description": one sentence explaining the task
-- "priority": one of "low", "medium", "high"
-
-Example format:
-[
-  {{"title": "Set up project repository", "description": "Initialize git repo and configure CI/CD pipeline.", "priority": "high"}},
-  ...
-]
-
-Return only the JSON array, no other text. [/INST]"""
+    user_message = SUGGEST_USER.format(
+        project_title=title,
+        project_description=f"Project description: {description}" if description else "",
+    )
 
     if not settings.HF_TOKEN or settings.HF_TOKEN == "hf_your_token_here":
         return _default_suggestions(title)
@@ -128,18 +118,23 @@ Return only the JSON array, no other text. [/INST]"""
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
-                "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct-v0.3",
-                headers={"Authorization": f"Bearer {settings.HF_TOKEN}"},
+                _hf_url(),
+                headers=_auth_headers(),
                 json={
-                    "inputs": prompt,
-                    "parameters": {"max_new_tokens": 600, "temperature": 0.5, "return_full_text": False},
+                    "model": settings.HF_MODEL,
+                    "messages": [
+                        {"role": "system", "content": SUGGEST_SYSTEM},
+                        {"role": "user", "content": user_message},
+                    ],
+                    "max_tokens": 600,
+                    "temperature": 0.5,
                 },
             )
             response.raise_for_status()
             data = response.json()
-            text = data[0].get("generated_text", "") if isinstance(data, list) else ""
+            text = data["choices"][0]["message"]["content"].strip()
 
-            # Parse JSON from the response
+            # Parse JSON array from the response
             start = text.find("[")
             end = text.rfind("]") + 1
             if start != -1 and end > start:
