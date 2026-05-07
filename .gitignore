@@ -2,11 +2,14 @@
 # Task Manager — .gitignore
 # ============================================================
 
-# ─── Environment & Secrets ──────────────────────────────────
+# ─── Secrets (.env) — NEVER commit ─────────────────────────
 .env
 .env.*
 !.env.example
-*.env
+
+# ─── Configuration (.config) — safe to commit ───────────────
+# .config files are tracked (they contain no secrets)
+!.config
 
 # ─── Python (Backend) ───────────────────────────────────────
 __pycache__/
